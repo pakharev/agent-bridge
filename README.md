@@ -29,7 +29,7 @@ Pin a release and verify its checksum. Nothing auto-updates: an update is
 the same two lines with a newer tag, approved by the user.
 
 ```sh
-V=v2.0.1
+V=v2.0.2
 curl -fsSLo ~/.local/bin/agent-bridge https://raw.githubusercontent.com/pakharev/agent-bridge/$V/agent_bridge.py
 chmod +x ~/.local/bin/agent-bridge && agent-bridge version   # compare sha256 with the release notes
 ```

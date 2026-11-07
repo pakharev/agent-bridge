@@ -290,5 +290,41 @@ class Hostile(Flow):
         self.assertIsNone(seen["https://evil.example/file"])
 
 
+class Delivery(Flow):
+    """2.0.2: gaps reported, late messages accepted once, one listener per cache."""
+
+    def test_gap_late_and_replay(self):
+        self.handshake()
+        with identity(self.A):
+            topic = ab.channels()["bob"]["topic"]
+            blobs = []
+            for i in range(3):
+                ab.send("bob", "text", text=f"m{i + 1}")
+                blobs.append(FakeRelay("fake").last(topic))
+        with identity(self.B):
+            ab.deliver("alice", topic, blobs[2], self.say)       # #3 first: gap of 2
+            self.assertIn("2 message(s) before #3", self.events[-2])
+            ab.deliver("alice", topic, blobs[0], self.say)       # late #1 still arrives
+            self.assertIn("| m1", self.events[-1])
+            n = len(self.events)
+            ab.deliver("alice", topic, blobs[0], self.say)       # replay of #1 dropped
+            ab.deliver("alice", topic, blobs[2], self.say)       # replay of #3 dropped
+            self.assertEqual(len(self.events), n)
+            ab.deliver("alice", topic, blobs[1], self.say)       # late #2 arrives, no gap line
+            self.assertEqual(len(self.events), n + 1)
+            self.assertIn("| m2", self.events[-1])
+
+    def test_second_listener_stops(self):
+        with identity(self.A):
+            ab.CACHE.mkdir(parents=True, exist_ok=True)
+            holder = open(ab.CACHE / "listen.lock", "a")
+            ab.fcntl.flock(holder, ab.fcntl.LOCK_EX | ab.fcntl.LOCK_NB)
+            try:
+                ab.watch(self.say)  # must return at once instead of serving
+            finally:
+                holder.close()
+        self.assertIn("another listener", self.events[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

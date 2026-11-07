@@ -58,7 +58,7 @@ import urllib.request
 import zlib
 from pathlib import Path
 
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 DEFAULT_RELAY = os.environ.get("AGENT_BRIDGE_RELAY", "https://ntfy.sh")
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "agent-bridge"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "agent-bridge"
@@ -68,6 +68,7 @@ EVENT_CHARS = 1200           # per-event text budget (Monitor views truncate ~1-
 WRAP = 160                   # per-line width (Monitor views truncate long lines)
 UA = f"agent-bridge/{VERSION}"
 MAX_PLAIN = 4 * 1024 * 1024  # decompressed message cap
+MAX_MISSING = 256            # skipped sequence numbers remembered per channel
 TOPIC_RE = re.compile(r"^ab2-[A-Za-z0-9]{22}$")
 ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
@@ -301,11 +302,19 @@ class Counter:
         return self._locked(f)
 
     def accept(self, seq):
+        """None for a replay; otherwise how many sequence numbers this message
+        skipped. Skipped numbers stay acceptable, so a late message still arrives."""
         def f(st):
-            if seq <= st["recv"]:
-                return False
-            st["recv"] = seq
-            return True
+            missing = st.setdefault("missing", [])
+            if seq > st["recv"]:
+                skipped = seq - st["recv"] - 1
+                st["missing"] = (missing + list(range(max(st["recv"] + 1, seq - MAX_MISSING), seq)))[-MAX_MISSING:]
+                st["recv"] = seq
+                return skipped
+            if seq in missing:
+                missing.remove(seq)
+                return 0
+            return None
         return self._locked(f)
 
 
@@ -508,6 +517,13 @@ def render(alias, peer, env):
 def watch(say):
     """Serve all channels, invites and joins on all relays; reconnect forever."""
     CACHE.mkdir(parents=True, exist_ok=True)
+    lock = open(CACHE / "listen.lock", "a")  # held for the life of this listener
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        say(f"[agent-bridge] another listener already serves {CACHE}; this one stops. "
+            "Sessions that need separate channels use separate XDG_CONFIG_HOME and XDG_CACHE_HOME.")
+        return
     state = CACHE / "listen-state.json"
     st = _read(state) if state.exists() else {"since": {}, "seen": []}
     seen = set(st["seen"])
@@ -596,8 +612,12 @@ def deliver(alias, topic, blob, say):
               and abs(time.time() - float(env.get("ts", 0))) <= MAX_AGE)
     except (TypeError, ValueError):
         ok = False
-    if not ok or not Counter(alias).accept(env["seq"]):
+    skipped = Counter(alias).accept(env["seq"]) if ok else None
+    if skipped is None:
         return  # malformed, stale or replayed
+    if skipped:
+        say(f"[agent-bridge] {alias}: {skipped} message(s) before #{env['seq']} have not arrived; "
+            "they may be lost, ask the peer to resend if they do not show up")
     say(render(alias, ch["peer"], env))
     if env.get("kind") == "close":
         p.unlink()
